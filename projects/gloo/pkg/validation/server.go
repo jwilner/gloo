@@ -113,6 +113,9 @@ func (s *validator) Sync(ctx context.Context, snap *v1.ApiSnapshot) error {
 	if s.shouldNotify(snap) {
 		s.pushNotifications()
 	}
+
+	// Every time a sync occurs, the latestSnapshot is updated
+	// this represents the state of the world according to Gloo
 	s.latestSnapshot = &snapCopy
 	s.lock.Unlock()
 	return nil
@@ -167,15 +170,33 @@ func (s *validator) Validate(ctx context.Context, req *validation.GlooValidation
 		s.lock.RUnlock()
 		return nil, eris.New("proxy validation called before the validation server received its first sync of resources")
 	}
+
+	// Previously, when we ran validate, what we were doing was taking the state of the world according to Gloo (latestSnapshot)
+	// and passing in the state of the world according to Gateway (req.GetProxy())
+	// and running validation against those two, to determine if the requested Proxy would be accepted by Gloo
 	snapCopy := s.latestSnapshot.Clone()
 	s.lock.RUnlock()
 
 	ctx = contextutils.WithLogger(ctx, "proxy-validator")
 
+
+	// (TODO) 1. We currently pass in the snapCopy (Gloo's state of the world) to the translator.
+	// Instead, we need to reconcile the state of the world with the proposed state of the world
+	// In Gateway, here's an example of this logic: https://github.com/solo-io/gloo/blob/c3f3b39916ae319b9a5a70570f2d80a85d6b7631/projects/gateway/pkg/validation/validator.go#L531
+	// we try to determine if it's an update or create and apply the resource accordingly
 	params := plugins.Params{Ctx: ctx, Snapshot: &snapCopy}
 
 	logger := contextutils.LoggerFrom(ctx)
 
+	// This function can stay the same. Given some params.Snapshot and a Proxy we produce a set of xdsResources
+	// and reports about the translation
+	// Previously:
+	//	Snapshot - State of the world according to Gloo
+	//	Proxy - State of the world according to Gateway
+	//
+	// Desired:
+	//	Snapshot - State of the world according to Gloo AND proposed changes
+	//	Proxy - State of the world according to Gateway
 	logger.Infof("received proxy validation request")
 	xdsSnapshot, resourceReports, report, err := s.translator.Translate(params, req.GetProxy())
 	if err != nil {
@@ -188,6 +209,10 @@ func (s *validator) Validate(ctx context.Context, req *validation.GlooValidation
 	routeErrorToWarnings(resourceReports, report)
 
 	logger.Infof("proxy validation report result: %v", report.String())
+	// (TODO) 2. We currently only return the ProxyReport back with the validationServerResponse
+	// this is because previously only Gateway resources were being modified, so the ProxyReport
+	// carried all reports to determine if the proposed change was valid or not
+	// Now, we should also pass the resourceReports (generic mapping of resource to their report)
 	return &validation.GlooValidationServiceResponse{ProxyReport: report}, nil
 }
 
